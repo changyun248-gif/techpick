@@ -3,78 +3,67 @@ import random
 import feedparser
 import requests
 import openai
+import time
+import re
 from googleapiclient.discovery import build
 
-# API 설정
+# 설정값
+HISTORY_FILE = "history.txt"
 openai.api_key = os.environ.get("OPENAI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 
-def get_latest_it_trend():
-    """IT 뉴스 RSS에서 최신 트렌드 키워드 가져오기"""
-    # 구글 뉴스 IT 카테고리 RSS
+def load_history():
+    if not os.path.exists(HISTORY_FILE): return set()
+    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f)
+
+def save_history(title):
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+        f.write(title + "\n")
+
+def get_latest_it_trend(history):
     rss_url = "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
-    if feed.entries:
-        # 상위 3개 뉴스 제목을 합쳐서 AI에게 트렌드 정보로 제공
-        titles = [entry.title for entry in feed.entries[:3]]
-        return "최신 트렌드 뉴스: " + ", ".join(titles)
-    return "최신 IT 트렌드에 대해 작성해줘."
+    for entry in feed.entries:
+        if entry.title not in history:
+            return entry.title
+    return "최신 AI 기술 동향"
 
-def get_unsplash_image_by_keyword(keyword):
-    """AI가 생성한 글에서 핵심 키워드를 뽑아 이미지 검색"""
-    if not UNSPLASH_ACCESS_KEY: return ""
-    # AI가 제안한 키워드로 이미지 검색
-    url = f"https://api.unsplash.com/photos/random?query={keyword}&client_id={UNSPLASH_ACCESS_KEY}"
-    try:
-        response = requests.get(url).json()
-        return response.get("urls", {}).get("regular", "")
-    except: return ""
-
-def generate_ai_post():
-    trend_info = get_latest_it_trend()
-    
-    prompt = f"""
-    당신은 전문 IT 블로거입니다. 아래 정보를 바탕으로 블로그 글을 작성하세요.
-    정보: {trend_info}
-    
-    요구사항:
-    1. HTML 형식으로 작성 (제목은 h1, 본문은 h2, p, ul 등 사용)
-    2. 본문 내용에 맞는 '이미지 검색용 키워드'를 맨 마지막에 [키워드: 단어] 형식으로 하나만 적어줘.
-    3. 글은 전문적이고 읽기 쉽게 작성해줘.
-    """
-    
-    client = openai.OpenAI()
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    
-    full_content = response.choices[0].message.content
-    
-    # [키워드: ...] 추출
-    import re
-    keyword_match = re.search(r"\[키워드:\s*(.*?)\]", full_content)
-    search_keyword = keyword_match.group(1) if keyword_match else "technology"
-    clean_content = re.sub(r"\[키워드:.*?\]", "", full_content)
-    
-    # 이미지 삽입
-    img_url = get_unsplash_image_by_keyword(search_keyword)
-    body = f'<img src="{img_url}"/><br>' + clean_content if img_url else clean_content
-    
-    return "오늘의 IT 트렌드 분석", body
+def generate_ai_post_with_retry(trend_title, retries=3):
+    for i in range(retries):
+        try:
+            prompt = f"""
+            주제: {trend_title}에 대한 전문적인 IT 블로그 글을 작성해줘.
+            요구사항:
+            1. HTML 형식 (h1, h2, p, ul)
+            2. 본문 끝에 [태그: 키워드1, 키워드2, 키워드3] 형식으로 태그를 달아줘.
+            3. 이미지 검색용 키워드는 마지막에 [이미지: 키워드] 형식으로 적어줘.
+            """
+            client = openai.OpenAI()
+            response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}])
+            return response.choices[0].message.content
+        except Exception as e:
+            if i == retries - 1: raise e
+            time.sleep(2)
 
 def post_to_blogger(title, content):
+    # 태그와 이미지 키워드 파싱
+    tags = re.findall(r"\[태그:\s*(.*?)\]", content)
+    img_match = re.search(r"\[이미지:\s*(.*?)\]", content)
+    
+    clean_content = re.sub(r"\[태그:.*?\]", "", content)
+    clean_content = re.sub(r"\[이미지:.*?\]", "", clean_content)
+    
+    # 이미지 삽입
+    img_url = f"https://source.unsplash.com/800x400/?{img_match.group(1)}" if img_match else ""
+    final_content = f'<img src="{img_url}"/><br>' + clean_content if img_url else clean_content
+
     service = build("blogger", "v3", developerKey=os.environ.get("BLOGGER_API_KEY"))
-    body = {"title": title, "content": content, "status": "DRAFT"}
-    try:
-        service.posts().insert(blogId=os.environ.get("BLOG_ID"), body=body, isDraft=True).execute()
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                      json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ 자동 포스팅 성공 (트렌드 반영 완료)"})
-    except Exception as e:
-        print(f"Error: {e}")
+    body = {"title": title, "content": final_content, "status": "DRAFT", "labels": tags}
+    service.posts().insert(blogId=os.environ.get("BLOG_ID"), body=body, isDraft=True).execute()
 
 if __name__ == "__main__":
-    title, content = generate_ai_post()
-    post_to_blogger(title, content)
+    history = load_history()
+    trend = get_latest_it_trend(history)
+    content = generate_ai_post_with_retry(trend)
+    post_to_blogger(trend, content)
+    save_history(trend)
