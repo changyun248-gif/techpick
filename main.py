@@ -55,17 +55,18 @@ def post_to_blogger(title, content):
     img_url = f"https://source.unsplash.com/800x400/?{img_match.group(1)}" if img_match else ""
     final_content = f'<img src="{img_url}"/><br>' + clean_content if img_url else clean_content
 
+    # 공백 및 특수문자 오류를 원천 차단하는 안전한 자격 증명 로드
     creds = Credentials(
-        None,
-        refresh_token=os.environ.get("REFRESH_TOKEN"),
-        client_id=os.environ.get("CLIENT_ID"),
-        client_secret=os.environ.get("CLIENT_SECRET"),
+        token=None,
+        refresh_token=os.environ.get("REFRESH_TOKEN").strip() if os.environ.get("REFRESH_TOKEN") else None,
+        client_id=os.environ.get("CLIENT_ID").strip() if os.environ.get("CLIENT_ID") else None,
+        client_secret=os.environ.get("CLIENT_SECRET").strip() if os.environ.get("CLIENT_SECRET") else None,
         token_uri="https://oauth2.googleapis.com/token"
     )
     
     service = build("blogger", "v3", credentials=creds)
     body = {"title": title, "content": final_content, "status": "DRAFT", "labels": tags}
-    service.posts().insert(blogId=os.environ.get("BLOG_ID"), body=body, isDraft=True).execute()
+    service.posts().insert(blogId=os.environ.get("BLOG_ID").strip(), body=body, isDraft=True).execute()
 
 if __name__ == "__main__":
     history = load_history()
